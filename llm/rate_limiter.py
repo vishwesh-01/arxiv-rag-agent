@@ -1,5 +1,6 @@
 import time
 import random
+import threading
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -7,17 +8,19 @@ T = TypeVar("T")
 
 
 class RateLimiter:
-    """Simple client-side throttle plus exponential backoff helper."""
+    """Thread-safe client-side throttle plus exponential backoff helper."""
 
     def __init__(self, min_interval: float = 4.0):
         self.min_interval = max(0.0, min_interval)
         self._last_call = 0.0
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
-        elapsed = time.monotonic() - self._last_call
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
-        self._last_call = time.monotonic()
+        with self._lock:
+            elapsed = time.monotonic() - self._last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last_call = time.monotonic()
 
     def run(self, fn: Callable[[], T], max_retries: int = 5) -> T:
         delay = 5.0

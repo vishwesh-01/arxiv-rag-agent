@@ -1,4 +1,5 @@
 import base64
+import concurrent.futures
 import re
 from pathlib import Path
 import pymupdf as fitz
@@ -8,7 +9,7 @@ from llm.gemini import invoke_vision
 
 def parse_pdf(pdf_path: Path) -> list[dict]:
     """
-    Primary parser: PyMuPDF4LLM page chunks enhanced with Gemini Vision
+    Primary parser: PyMuPDF4LLM page chunks enhanced with parallel Gemini Vision
     for visual candidate pages (figures, tables, equations, diagrams).
     """
     doc = fitz.open(pdf_path)
@@ -19,7 +20,34 @@ def parse_pdf(pdf_path: Path) -> list[dict]:
     )
 
     visual_candidates = detect_visual_candidates(pdf_path)
-    visual_pages = {c["page"] for c in visual_candidates}
+    visual_pages_sorted = sorted(list({c["page"] for c in visual_candidates}))
+
+    # Extract base64 image strings safely on main thread before threading
+    visual_tasks = []
+    for p_num in visual_pages_sorted:
+        page = doc[p_num - 1]
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = pix.tobytes("png")
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+        visual_tasks.append((p_num, img_b64))
+
+    doc.close()
+
+    # Process visual candidate LLM API calls concurrently
+    page_visual_map = {}
+    if visual_tasks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_page = {
+                executor.submit(process_page_visual_b64, img_b64, p_num): p_num
+                for p_num, img_b64 in visual_tasks
+            }
+            for future in concurrent.futures.as_completed(future_to_page):
+                p_num = future_to_page[future]
+                try:
+                    page_visual_map[p_num] = future.result()
+                except Exception as exc:
+                    print(f"Parallel visual processing failed for page {p_num}: {exc}")
+                    page_visual_map[p_num] = []
 
     output = []
     for index, item in enumerate(chunks):
@@ -32,13 +60,10 @@ def parse_pdf(pdf_path: Path) -> list[dict]:
                 "type": "text",
             })
 
-        # Process page visual content if signaled
-        if page in visual_pages:
-            visual_items = process_page_visuals(doc[page - 1], page)
-            for item in visual_items:
-                output.append(item)
-
-    doc.close()
+        # Attach parallel visual items for this page
+        if page in page_visual_map:
+            for v_item in page_visual_map[page]:
+                output.append(v_item)
 
     # Basic quality signal for scanned/broken PDFs.
     total_chars = sum(len(x["text"]) for x in output)
@@ -47,16 +72,11 @@ def parse_pdf(pdf_path: Path) -> list[dict]:
 
     return output
 
-def process_page_visuals(page: fitz.Page, page_num: int) -> list[dict]:
+def process_page_visual_b64(img_b64: str, page_num: int) -> list[dict]:
     """
-    Renders visual pages to high-resolution images and uses Gemini Vision
-    to parse tables, figures, diagrams, and LaTeX equations.
+    Sends base64 image string to Gemini Vision to parse tables, figures, diagrams, and LaTeX equations.
     """
     try:
-        pix = page.get_pixmap(dpi=150)
-        img_bytes = pix.tobytes("png")
-        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-
         prompt = (
             "Analyze this academic paper page image:\n"
             "1. Convert any tables into clean Markdown tables.\n"
