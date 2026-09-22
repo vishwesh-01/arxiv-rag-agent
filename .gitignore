@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.pytest_cache/
+
+data/papers/*
+data/processed/*
+data/chroma/*
+!data/papers/.gitkeep
+!data/processed/.gitkeep
+!data/chroma/.gitkeep
+
+papers.json
+sessions.json
