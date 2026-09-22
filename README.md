@@ -298,6 +298,13 @@ Sources:
   - Page 4 (text)
 ```
 
+<img width="1438" height="896" alt="Screenshot 2026-09-22 153613" src="https://github.com/user-attachments/assets/c27c4042-bb00-4bc4-bf9e-338aba5a4d8c" />
+<img width="1433" height="904" alt="Screenshot 2026-09-22 153631" src="https://github.com/user-attachments/assets/27a346bd-117d-436a-9ea3-ae6169901e00" />
+<img width="1441" height="938" alt="Screenshot 2026-09-22 153643" src="https://github.com/user-attachments/assets/73d811f2-b562-4fc2-a5f6-f5131c41b844" />
+<img width="1438" height="728" alt="Screenshot 2026-09-22 153655" src="https://github.com/user-attachments/assets/d8413876-52be-4475-a32c-2e557578825d" />
+
+
+
 ---
 
 ## Design Decisions & Tradeoffs
@@ -308,7 +315,7 @@ Sources:
 
 ### 2. Dedicated Vision Model Decoupling (`GEMINI_VISION_MODEL`)
 - **Decision**: Decoupled vision execution (`invoke_vision()`) from text QA (`invoke_chat()`).
-- **Tradeoff**: Allows users to configure lightweight/specialized vision models (e.g., `gemma-4-31b-it` or `gemma-3-27b-it`) for document parsing while using faster chat models for QA logic.
+- **Tradeoff**: Allows users to configure lightweight/specialized vision models (e.g., `gemma-4-31b-it`) for document parsing while using faster chat models for QA logic.
 
 ### 3. Type-Aware Block Chunking vs. Standard Character Splitting
 - **Decision**: `chunk_pages()` identifies block metadata types (`table`, `figure`, `equation`) and preserves them as whole chunks rather than breaking Markdown tables or LaTeX blocks across character split points.
