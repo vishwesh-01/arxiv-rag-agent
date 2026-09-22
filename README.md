@@ -1,244 +1,327 @@
-# Autonomous arXiv Paper Digest & QA Agent
+# Autonomous Multimodal arXiv Paper Digest & QA Agent
 
-A local CLI research assistant for arXiv papers.
+An autonomous local CLI research assistant for arXiv scientific papers built with **LangGraph**, **PyMuPDF**, **ChromaDB**, and **Gemini Vision**.
 
-It accepts either:
+It accepts:
+- A natural-language research topic (e.g., `"transformer attention mechanism"`)
+- An arXiv ID (e.g., `"1706.03762"`)
+- An arXiv URL (e.g., `"https://arxiv.org/abs/1706.03762"`)
 
-- a natural-language research topic
-- an arXiv ID
-- an arXiv URL
+It searches/fetches the paper, parses text and visual components (diagrams, architecture charts, visual tables, LaTeX equations), creates a structured executive briefing, and launches an interactive grounded RAG QA session.
 
-It searches/fetches the paper, parses it locally, creates a structured executive briefing, and opens a grounded RAG QA loop.
+---
 
-## Architecture
+## State Graph Architecture
 
-```text
-User
- |
- v
-Query Understanding
- |
- +---- arXiv ID/URL --------+
- |                          |
- +---- Topic -> Search -> Rank
-                            |
-                            v
-                       Paper Registry
-                            |
-                    already indexed?
-                       /          \
-                     yes           no
-                      |             |
-                      |        Download PDF
-                      |             |
-                      |        PyMuPDF4LLM
-                      |             |
-                      |        Chunk + metadata
-                      |             |
-                      |        Gemini embeddings
-                      |             |
-                      +------> Chroma
-                                  |
-                                  v
-                           Executive Briefing
-                                  |
-                                  v
-                              QA session
-                                  |
-                                  v
-                            Chroma retrieval
-                                  |
-                                  v
-                           Grounded Gemini
-```
-
-## Why this PDF design?
-
-The first implementation rendered every PDF page and sent every page to a vision model. That is expensive and can incorrectly treat author photos, logos, or decorative images as research figures.
-
-This version uses PyMuPDF4LLM for local, layout-aware PDF extraction and only uses LLM calls for summarization/QA. A conservative local detector is provided for future selective figure/table vision processing.
-
-## Cache design
-
-Each paper is identified by its arXiv ID.
-
-Example:
+The workflow is orchestrated using **LangGraph** with explicit state transitions.
 
 ```text
-1706.03762
-    |
-    +-- data/papers/1706.03762.pdf
-    |
-    +-- Chroma collection: paper_1706_03762
-    |
-    +-- papers.json
+               +-----------------------+
+               |     User Input        |
+               +-----------+-----------+
+                           |
+                           v
+               +-----------------------+
+               |   understand_query    |
+               +-----------+-----------+
+                           |
+           +---------------+---------------+
+           |                               |
+ (arXiv ID or URL)                   (Topic Query)
+           |                               |
+           v                               v
+ +-------------------+           +-------------------+
+ |  retrieve_arxiv   |           |  retrieve_arxiv   |
+ |  (Get single paper|           |  (Search 8 papers)|
+ +---------+---------+           +---------+---------+
+           |                               |
+           |                               v
+           |                     +-------------------+
+           |                     |   select_paper    |
+           |                     +---------+---------+
+           |                               |
+           +---------------+---------------+
+                           |
+                           v
+               +-----------------------+
+               |    ensure_indexed     |
+               | (Visual PDF Parser &  |
+               | Chroma Vector Store)  |
+               +-----------+-----------+
+                           |
+                           v
+               +-----------------------+
+               |   generate_briefing   |
+               |  (Structured Brief)   |
+               +-----------+-----------+
+                           |
+                           v
+               +-----------------------+
+               |     QA Loop           |
+               | retrieve_for_qa       |
+               | answer_qa             |
+               +-----------------------+
 ```
 
-If the same paper is selected again:
+### State Shape (`AgentState`)
 
-1. The PDF is not downloaded again.
-2. The PDF is not parsed again.
-3. The chunks are not embedded again.
-4. The existing Chroma collection is loaded.
+```python
+class AgentState(TypedDict):
+    user_input: str                       # Raw query, ID, or URL
+    input_type: Optional[str]             # "paper" or "topic"
+    query: Optional[str]                  # Search query string if topic
+    arxiv_id: Optional[str]               # Normalized arXiv ID
+    candidates: list[dict]                # Candidate arXiv paper metadata list
+    selected_paper: Optional[dict]        # Active selected paper metadata
+    indexed: bool                         # True if Chroma collection is loaded from cache
+    collection_name: Optional[str]        # Chroma collection identifier
+    parsed_documents: list[dict]          # Output blocks from PyMuPDF & Gemini Vision
+    briefing: Optional[dict]              # Executive briefing object matching PaperBriefing schema
+    question: Optional[str]               # User QA question
+    retrieved_docs: list[dict]            # Retrieved context chunks for QA
+    answer: Optional[str]                 # Grounded response string
+    sources: list[dict]                   # List of source citations with page numbers & block types
+    error: Optional[str]                  # Error tracking message
+```
 
-## Embeddings
+---
 
-One embedding model is used consistently:
+## Multimodal Vision & Parsing Pipeline
+
+Scientific papers convey critical ideas through architectural diagrams, plots, data tables, and mathematical formulas. Standard PDF text extractors frequently mangle or lose these visual elements.
 
 ```text
-gemini-embedding-2-preview
+                      PDF File (data/papers/<arxiv_id>.pdf)
+                                      |
+                                      v
+                             PyMuPDF4LLM Parsing
+                                      |
+                                      v
+                        detect_visual_candidates()
+            (Scans for captions, images, vector drawing clusters)
+                                      |
+                   +------------------+------------------+
+                   |                                     |
+           (Text-only Pages)                    (Visual Candidate Pages)
+                   |                                     |
+                   v                                     v
+            Raw Text Chunks                     PyMuPDF Page Render (150 DPI)
+                   |                                     |
+                   |                                     v
+                   |                            Gemini Vision LLM
+                   |                       (gemma-4-31b / gemini-vision)
+                   |                                     |
+                   |                 +-------------------+-------------------+
+                   |                 |                   |                   |
+                   |                 v                   v                   v
+                   |          Markdown Tables    LaTeX Equations    Figure Descriptions
+                   |           (type: table)     (type: equation)     (type: figure)
+                   +-----------------+-------------------+-------------------+
+                                     |
+                                     v
+                              chunk_pages()
+              (Preserves table/figure/equation chunks intact)
+                                     |
+                                     v
+                               ChromaDB
 ```
 
-Each paper has an isolated Chroma collection. "Different embeddings per paper" therefore means separate vector data per paper, not a different embedding model instance.
+1. **Selective Visual Candidate Detection**: `detect_visual_candidates()` scans PDF pages for figure/table/algorithm/equation caption signals and vector drawing density.
+2. **Dedicated Multimodal Model**: Pages with visual signals are rendered at high resolution (150 DPI) and processed by `GEMINI_VISION_MODEL` (`invoke_vision()`).
+3. **Structured Content Extraction**:
+   - **Tables**: Converted into clean Markdown tables (`type: "table"`).
+   - **Figures & Diagrams**: Extracted with full structural descriptions of flow charts, plots, and network architectures (`type: "figure"`).
+   - **Math & Equations**: Extracted using clean LaTeX notation (`$$ ... $$`, `type: "equation"`).
+4. **Type-Aware Chunking**: Visual blocks (`table`, `figure`, `equation`) are kept intact during chunking to preserve complete contextual boundaries.
 
-## Gemini free-tier handling
+---
 
-The application intentionally limits API usage:
+## Setup & Running Locally
 
-- PDF parsing is local.
-- No page-by-page Gemini vision calls.
-- Embeddings are sent through LangChain's batch embedding operation.
-- A client-side minimum request interval is configurable.
-- Rate-limit/quota errors use exponential backoff.
-- Cached papers do not require re-embedding.
+### Prerequisites
+- Python 3.11+
+- Free Google Gemini API Key from [Google AI Studio](https://aistudio.google.com/)
 
-The exact free-tier quotas vary by model and Google project and can change. Check Google's Gemini API rate-limit documentation before testing.
-
-## Setup
-
-Python 3.11+ recommended.
+### 1. Environment Setup
 
 ```bash
+# Clone the repository
+git clone https://github.com/vishwesh-01/arxiv-rag-agent.git
+cd arxiv-rag-agent
+
+# Create a virtual environment
 python -m venv .venv
 ```
 
-Windows:
+Activate the virtual environment:
+- **Windows (PowerShell)**:
+  ```powershell
+  .venv\Scripts\Activate.ps1
+  ```
+- **macOS/Linux**:
+  ```bash
+  source .venv/bin/activate
+  ```
 
-```bash
-.venv\Scripts\activate
-```
-
-macOS/Linux:
-
-```bash
-source .venv/bin/activate
-```
-
-Install:
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Copy:
+### 3. Configure Environment Variables
 
-```text
-.env.example -> .env
+Copy `.env.example` to `.env`:
+
+```bash
+cp .env.example .env
 ```
 
-Set:
+Edit `.env` and set your API key and model choices:
 
 ```env
-GEMINI_API_KEY=your_key
+GEMINI_API_KEY=your_google_ai_studio_api_key
+
+# Model Configurations
+GEMINI_CHAT_MODEL=gemini-3.1-flash
+GEMINI_VISION_MODEL=gemma-3-27b-it
+GEMINI_EMBED_MODEL=gemini-embedding-001
+
+# Rate Limiter & Throttling
+GEMINI_MIN_REQUEST_INTERVAL=4
 ```
 
-Run:
+### 4. Run the Agent
 
 ```bash
 python app.py
 ```
 
-## Example
+---
+
+## Example Run
+
+### Input & Paper Selection
 
 ```text
-Research topic or arXiv ID/URL:
+==================================================
+  Autonomous arXiv Paper Digest & QA Agent
+==================================================
 
-> retrieval augmented generation for scientific papers
+Enter an arXiv ID (e.g. 1706.03762), an arXiv URL,
+or a research topic to search for.
+Type 'exit' to quit.
+
+> 1706.03762
 ```
 
-The agent returns candidate papers. Select one.
+### Output 1: Executive Briefing
 
-It then produces:
+```json
+{
+  "title": "Attention Is All You Need",
+  "authors": [
+    "Ashish Vaswani", "Noam Shazeer", "Niki Parmar", "Jakob Uszkoreit",
+    "Llion Jones", "Aidan N. Gomez", "Lukasz Kaiser", "Illia Polosukhin"
+  ],
+  "arxiv_id": "1706.03762",
+  "publish_date": "2017-06-12T17:57:34Z",
+  "link": "http://arxiv.org/abs/1706.03762v7",
+  "why_it_matters": "Replaces recurrent and convolutional layers with self-attention mechanisms, setting new benchmarks in machine translation with drastically reduced training time.",
+  "problem_statement": "Dominant sequence transduction models rely on complex recurrent or convolutional networks, which limits parallelization across long sequences.",
+  "method": [
+    "Transformer encoder-decoder architecture using stacked multi-head self-attention.",
+    "Positional encodings added to input embeddings to inject sequence order.",
+    "Scaled Dot-Product Attention computed as Softmax(Q K^T / sqrt(d_k)) V."
+  ],
+  "key_results": [
+    "Achieves 28.4 BLEU on English-to-German translation (improving by 2.0 BLEU).",
+    "Reaches 41.8 BLEU on English-to-French translation with 3.5 days of training on 8 GPUs."
+  ],
+  "limitations": [
+    "Quadratic computational complexity with respect to sequence length in self-attention.",
+    "Observed sensitivity to hyperparameter tuning and learning rate warm-up schedules."
+  ],
+  "follow_up_questions": [
+    "How does positional encoding perform relative to learned positional embeddings?",
+    "What is the impact of multi-head attention versus single-head attention?"
+  ]
+}
+```
 
-- title
-- authors
-- arXiv ID
-- date
-- link
-- why the paper matters
-- problem
-- method
-- key results
-- limitations
-- follow-up questions
-
-Then:
+### Output 2: Interactive QA Session
 
 ```text
-QA mode
+--------------------------------------------------
+  Paper indexed and executive briefing created.
+  Entering grounded QA session.
+  Type 'back' to choose another paper or 'exit' to quit.
+--------------------------------------------------
 
-You:
-What problem does the paper solve?
+Question: Can you describe the architectural diagram of the Transformer?
 
 Assistant:
-...
+According to Figure 1 on page 3, the Transformer consists of an Encoder (left) and a Decoder (right), stacked N = 6 times.
 
-Sources: page 2 (text), page 4 (text)
+- **Encoder**: Contains a multi-head self-attention mechanism followed by a position-wise feed-forward network, with residual connections and layer normalization around each sub-layer.
+- **Decoder**: Contains a multi-head self-attention mechanism, a multi-head cross-attention mechanism over the encoder outputs, and position-wise feed-forward networks.
+
+Sources:
+  - Page 3 (figure)
+  - Page 4 (figure)
+
+--------------------------------------------------
+
+Question: What BLEU scores did the model achieve on English to German and English to French?
+
+Assistant:
+As shown in Table 2 on page 8:
+- **English-to-German (newstest2014)**: 28.4 BLEU (outperforming previous state-of-the-art models including Ensemble models).
+- **English-to-French (newstest2014)**: 41.8 BLEU.
+
+Sources:
+  - Page 8 (table)
+
+--------------------------------------------------
+
+Question: What is the exact formula for Scaled Dot-Product Attention?
+
+Assistant:
+The formula for Scaled Dot-Product Attention is:
+
+$$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{Q K^T}{\sqrt{d_k}}\right) V $$
+
+where $Q$ is the Query matrix, $K$ is the Key matrix, $V$ is the Value matrix, and $d_k$ is the dimensionality of the keys.
+
+Sources:
+  - Page 4 (equation)
+  - Page 4 (text)
 ```
 
-## Failure handling
+---
 
-### No search results
+## Design Decisions & Tradeoffs
 
-The agent reports that arXiv returned no candidates.
+### 1. Selective Multimodal Vision Processing vs. Blind Page-by-Page Vision
+- **Decision**: Use `detect_visual_candidates()` to flag candidate pages containing images, charts, tables, or vector drawings, and render only those pages for vision LLM analysis.
+- **Tradeoff**: Saves significant API quota, cost, and latency compared to sending every PDF page to a vision model, while preserving rich descriptions for complex diagrams and tables.
 
-### Bad PDF
+### 2. Dedicated Vision Model Decoupling (`GEMINI_VISION_MODEL`)
+- **Decision**: Decoupled vision execution (`invoke_vision()`) from text QA (`invoke_chat()`).
+- **Tradeoff**: Allows users to configure lightweight/specialized vision models (e.g., `gemma-4-31b-it` or `gemma-3-27b-it`) for document parsing while using faster chat models for QA logic.
 
-PyMuPDF4LLM is attempted first. A plain PyMuPDF text fallback is used if extracted text is suspiciously small.
+### 3. Type-Aware Block Chunking vs. Standard Character Splitting
+- **Decision**: `chunk_pages()` identifies block metadata types (`table`, `figure`, `equation`) and preserves them as whole chunks rather than breaking Markdown tables or LaTeX blocks across character split points.
+- **Tradeoff**: Slightly larger individual chunk sizes for visual blocks, but guarantees complete context preservation during vector retrieval.
 
-### Gemini rate limit
+### 4. Per-Paper Isolated Vector Collections in ChromaDB
+- **Decision**: Store embeddings in paper-isolated Chroma collections (`paper_1706_03762`).
+- **Tradeoff**: Prevents cross-paper chunk pollution and speeds up query retrieval, though multi-paper comparative RAG requires querying across collections.
 
-The rate limiter waits and retries with exponential backoff. The cached PDF/Chroma state is preserved.
+---
 
-### Re-running a paper
+## Known Limitations & Future Improvements
 
-The existing Chroma collection is reused.
-
-## Design decisions & tradeoffs
-
-### LangGraph
-
-The assessment explicitly asks for an identifiable stateful graph. LangGraph makes the nodes and shared state explicit.
-
-### PyMuPDF4LLM
-
-The system does not assume that every page image is meaningful research content. Local parsing is cheaper and more deterministic than asking a multimodal model to inspect every page.
-
-### Chroma
-
-Chroma is local and simple for an assessment project. A collection is isolated per arXiv paper, which makes cache lookup straightforward.
-
-### Gemini
-
-Gemini is used because it has a practical free-tier path for the assessment. The API is wrapped with throttling and retry behavior.
-
-### Grounding
-
-QA answers are generated from retrieved paper chunks only. The prompt explicitly tells the model to refuse when the retrieved paper context does not support an answer.
-
-## Known limitations
-
-- Figure/table visual understanding is intentionally conservative in this first implementation.
-- Topic ranking currently relies on arXiv relevance ordering rather than a separate cross-encoder.
-- Retrieval uses vector similarity without a dedicated reranker.
-- Sessions are stored in JSON because multi-user persistence is out of scope.
-- The system is designed for local CLI use, not production deployment.
-
-## Suggested next improvements
-
-1. Add section-aware chunking.
-2. Add BM25 + vector hybrid retrieval.
-3. Add a local reranker.
-4. Extract figure/table captions and selectively send only those regions to Gemini vision.
-5. Add citation-aware answer formatting.
-6. Add tests around PDF parsing and cache reuse.
+1. **Bounding-Box Cropping**: Currently, candidate pages are rendered as full pages at 150 DPI. Cropping specific bounding boxes for individual figures will reduce payload size further.
+2. **Hybrid Retrieval**: Combining dense vector embeddings with sparse keyword search (BM25) would improve retrieval on rare mathematical symbols or hyperparameter names.
+3. **Local Reranking**: Incorporating a cross-encoder reranker (e.g., `bge-reranker`) prior to passing context to the QA model.
