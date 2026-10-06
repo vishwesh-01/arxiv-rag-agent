@@ -30,7 +30,7 @@ chat_model = ChatGoogleGenerativeAI(
 vision_model = ChatGoogleGenerativeAI(
     model=VISION_MODEL,
     google_api_key=API_KEY,
-    temperature=0,
+    # temperature=0,
 )
 
 embedding_model = GoogleGenerativeAIEmbeddings(
