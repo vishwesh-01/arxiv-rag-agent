@@ -129,6 +129,18 @@ def qa_loop(sid, paper):
         "\nQA mode. Commands: /new, /paper, /sessions, /exit"
     )
 
+    session_data = get(sid)
+    if session_data and session_data.get("messages"):
+        for msg in session_data["messages"]:
+            if msg["role"] == "user":
+                print(f"\nYou: {msg['content']}")
+            elif msg["role"] == "assistant":
+                print(f"\nAssistant:\n{msg['content']}")
+                sources = msg.get("sources", [])
+                unique = sorted({(s["page"], s["type"]) for s in sources})
+                if unique:
+                    print("Sources: " + ", ".join(f"page {p} ({t})" for p, t in unique))
+
     while True:
         question = input("\nYou: ").strip()
 
@@ -212,6 +224,16 @@ Commands:
     sid = select_or_create_session()
 
     while True:
+        session_data = get(sid)
+        if session_data and session_data.get("paper"):
+            action = qa_loop(sid, session_data["paper"])
+            if action == "exit":
+                break
+            if action == "new":
+                sid = create()
+                print(f"\nNew session: {sid}")
+            continue
+
         user_input = input(
             "\nResearch topic or arXiv ID/URL (or /exit): "
         ).strip()
@@ -228,14 +250,6 @@ Commands:
 
             if result.get("briefing"):
                 print_briefing(result["briefing"])
-
-            action = qa_loop(sid, paper)
-
-            if action == "exit":
-                break
-            if action == "new":
-                sid = create()
-                print(f"\nNew session: {sid}")
 
         except Exception as exc:
             print(f"\nAgent error: {exc}")
